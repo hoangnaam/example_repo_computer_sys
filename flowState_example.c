@@ -8,6 +8,8 @@
 #include <tkjhat/sdk.h>
 #include <math.h>
 
+#define INPUT_BUFFER_SIZE 256
+
 enum modes {mode_0= 0, mode_1= 1, mode_2= 2};
     enum modes current_mode = mode_0;
 enum states {WAITING = 3, DATA_READY = 4};
@@ -37,6 +39,60 @@ void choosing_symbol_task(void *pvParameters) {
     }
 }
 
+static void receive_task(void *arg){
+    (void)arg;
+    char line[INPUT_BUFFER_SIZE];
+    size_t index = 0;
+    
+    while (1){
+        //OPTION 1
+        // Using getchar_timeout_us https://www.raspberrypi.com/documentation/pico-sdk/runtime.html#group_pico_stdio_1ga5d24f1a711eba3e0084b6310f6478c1a
+        // take one char per time and store it in line array, until reeceived the \n
+        // The application should instead play a sound, or blink a LED. 
+        int c = getchar_timeout_us(0);
+        if (c != PICO_ERROR_TIMEOUT){// I have received a character
+            if (c == '\r') continue; // ignore CR, wait for LF if (ch == '\n') { line[len] = '\0';
+            if (c == '1'){
+                current_mode = mode_1;
+            }
+            else if (c == '2'){
+                current_mode = mode_2;
+            }
+            else if (c == '\n'){
+                // terminate and process the collected line
+                line[index] = '\0'; 
+                printf("__[RX]:\"%s\"__\n", line); //Print as debug in the output
+                index = 0;
+                vTaskDelay(pdMS_TO_TICKS(100)); // Wait for new message
+            }
+            else if(index < INPUT_BUFFER_SIZE - 1){
+                line[index++] = (char)c;
+            }
+            else { //Overflow: print and restart the buffer with the new character. 
+                line[INPUT_BUFFER_SIZE - 1] = '\0';
+                printf("__[RX]:\"%s\"__\n", line);
+                index = 0; 
+                line[index++] = (char)c; 
+            }
+        }
+        else {
+            vTaskDelay(pdMS_TO_TICKS(100)); // Wait for new message
+        }
+        //OPTION 2. Use the whole buffer. 
+        /*absolute_time_t next = delayed_by_us(get_absolute_time,500);//Wait 500 us
+        int read = stdio_get_until(line,INPUT_BUFFER_SIZE,next);
+        if (read == PICO_ERROR_TIMEOUT){
+            vTaskDelay(pdMS_TO_TICKS(100)); // Wait for new message
+        }
+        else {
+            line[read] = '\0'; //Last character is 0
+            printf("__[RX] \"%s\"\n__", line);
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }*/
+    }
+
+
+}
 
 void movement_task(void *pvParameters) {
     while (1) {
@@ -93,12 +149,13 @@ int main() {
     gpio_set_irq_enabled_with_callback(BUTTON1, GPIO_IRQ_EDGE_FALL, true, &buttonfxn);
     gpio_set_irq_enabled_with_callback(BUTTON2, GPIO_IRQ_EDGE_FALL, true, &buttonfxn);
     // Create tasks
-    TaskHandle_t debugging,choosetask1,choosetask2,imutask, movementtask = NULL;
+    TaskHandle_t receivetask,debugging,choosetask1,choosetask2,imutask, movementtask = NULL;
     xTaskCreate(imu_task, "IMU Task", 2048, NULL, 2, &imutask);
     xTaskCreate(movement_task, "Movement Task", 2048, NULL, 2, &movementtask);
     xTaskCreate(choosing_symbol_task, "Choosing Symbol Task 1", 2048, NULL, 2, &choosetask1);
     xTaskCreate(choosing_symbol_task_2, "Choosing Symbol Task 2", 2048, NULL, 2, &choosetask2);
-    xTaskCreate(debugging_task, "Debugging Task", 2048, NULL, 2, &debugging);
+    //xTaskCreate(debugging_task, "Debugging Task", 2048, NULL, 2, &debugging);
+    xTaskCreate(receive_task, "Receive Task", 2048, NULL, 2, &receivetask);
 
     // Start the scheduler
     vTaskStartScheduler();
