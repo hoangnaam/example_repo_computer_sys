@@ -19,19 +19,28 @@ void imu_task(void *pvParameters);
 void check_values_task(float in_ax, float in_ay, float in_az, float in_gx, float in_gy, float in_gz, float in_t) {
     if (fabs(in_ax) > 0.85 ) {
         symbol = 0x2E; // '.'
-        printf("Symbol: %c\n", symbol);
+        
 
     }
     else if (fabs(in_ay) > 0.85 ) {
         symbol = 0x2D; // '-'
-        printf("Symbol: %c\n", symbol);
+        
     }
     else if (fabs(in_az) > 0.85 ) {
         symbol = 0x20; // ' ' (space)
-        printf("Symbol: %c\n", symbol);
     }
 }
 
+void print_symbol_task(void *pvParameters) {
+    (void)pvParameters;
+    while (1) {
+        if (symbol != 0) {
+            printf("Symbol: %c\n", (char)symbol);
+            symbol = 0; // Reset symbol after printing
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
 
 void buttonfxn(uint gpio, uint32_t events) {
     // Just a placeholder for button press functionality
@@ -92,12 +101,12 @@ int main() {
     printf("Start acceleration test\n");
 
     gpio_set_irq_enabled_with_callback(BUTTON1, GPIO_IRQ_EDGE_FALL, true, &buttonfxn);
-    TaskHandle_t hIMUTask = NULL;
+    TaskHandle_t hprinting, hIMUTask = NULL;
 
     xTaskCreate(imu_task, "IMUTask", 2048, NULL, 2, &hIMUTask);
+    xTaskCreate(print_symbol_task, "PrintSymbolTask", 2048, NULL, 2, &hprinting);
     // Start the FreeRTOS scheduler
     vTaskStartScheduler();
 
     return 0;
 }
-
