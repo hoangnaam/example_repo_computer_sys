@@ -19,15 +19,12 @@ void imu_task(void *pvParameters);
 void check_values_task(float in_ax, float in_ay, float in_az, float in_gx, float in_gy, float in_gz, float in_t) {
     if (fabs(in_ax) > 0.85 ) {
         symbol = ".";
-        printf("Symbol set to: %s\n", symbol);
     }
     else if (fabs(in_ay) > 0.85 ) {
         symbol = "-";
-        printf("Symbol set to: %s\n", symbol);
     }
     else if (fabs(in_az) > 0.85 ) {
         symbol = " ";
-        printf("Symbol set to: %s\n", symbol);
     }
 }
 
@@ -56,6 +53,7 @@ void buttonfxn(uint gpio, uint32_t events) {
 static void display_task(void *pvParameters) {
     (void)pvParameters;
     uint32_t gpio;
+    init_display();
     while (1) {
         if (xQueueReceive(btn_queue, &gpio, portMAX_DELAY) == pdTRUE) {
             // Process button press event
@@ -86,7 +84,7 @@ void imu_task(void *pvParameters) {
         while (1)
         {
             if (ICM42670_read_sensor_data(&ax, &ay, &az, &gx, &gy, &gz, &t) == 0) {
-                continue;
+                printf("Ax: %.2f Ay: %.2f Az: %.2f Gx: %.2f Gy: %.2f Gz: %.2f T: %.2f\n", ax, ay, az, gx, gy, gz, t);
             } else {
                 printf("Failed to read imu data\n");
             }
@@ -113,8 +111,8 @@ int main() {
     xTaskCreate(imu_task, "IMUTask", 2048, NULL, 2, &hIMUTask);
     xTaskCreate(display_task, "DisplayTask", 2048, NULL, 2, &hdisplay);
     // Start the FreeRTOS scheduler
+    printf("Starting scheduler\n");
     vTaskStartScheduler();
 
     return 0;
 }
-
