@@ -12,7 +12,6 @@
 float ax_global, ay_global, az_global, gx_global, gy_global, gz_global, t_global;
 int symbol;
 float acc_buff[3];
-bool sensor_flag = true;
 
 void imu_task(void *pvParameters);
 void checking_max(void *arg);
@@ -44,9 +43,7 @@ void imu_task(void *pvParameters) {
                 float modulus = sqrt(ax_global*ax_global + ay_global*ay_global);
                 acc_buff[0] = modulus;
                 acc_buff[1] = az_global;
-                acc_buff[2] = gy_global;
-                sensor_flag = false;
-                    
+                acc_buff[2] = gy_global;                    
             } else {
                 printf("Failed to read imu data\n");
             }
