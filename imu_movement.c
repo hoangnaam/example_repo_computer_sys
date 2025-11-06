@@ -11,7 +11,7 @@
 
 float ax_global, ay_global, az_global, gx_global, gy_global, gz_global, t_global;
 int symbol;
-float gyro_buf[3];
+float acc_buff[3];
 
 void imu_task(void *pvParameters);
 void checking_max(void *arg);
@@ -29,7 +29,7 @@ void imu_task(void *pvParameters) {
             printf ("Enable gyro: %d\n",_enablegyro);
             int _gyro = ICM42670_startGyro(ICM42670_GYRO_ODR_DEFAULT, ICM42670_GYRO_FSR_DEFAULT);
             printf ("Gyro return:  %d\n", _gyro);
-            int _accel = ICM42670_startAccel(ICM42670_ACCEL_ODR_DEFAULT, ICM42670_ACCEL_FSR_DEFAULT);
+            int _accel = ICM42670_startAccel(100, ICM42670_ACCEL_FSR_DEFAULT);
             printf ("Accel return:  %d\n", _accel);
         } else {
             printf("Failed to initialize ICM-42670P.\n");
@@ -41,9 +41,9 @@ void imu_task(void *pvParameters) {
             if (ICM42670_read_sensor_data(&ax_global, &ay_global, &az_global, &gx_global, &gy_global, &gz_global, &t_global) == 0) {
                 // printf("Acc: ax= %.3f ay=%.3f az=%.3f|Gyro [dps]: gx=%.3f gy=%.3f gz=%.3f \n", 
                 //     ax_global, ay_global, az_global, gx_global, gy_global, gz_global, t_global);
-                gyro_buf[0] = gx_global;
-                gyro_buf[1] = gy_global;
-                gyro_buf[2] = gz_global;
+                acc_buff[0] = ax_global;
+                acc_buff[1] = az_global;
+                acc_buff[2] = gy_global;
             } else {
                 printf("Failed to read imu data\n");
             }
@@ -53,40 +53,40 @@ void imu_task(void *pvParameters) {
 
 void checking_max(void *arg){
     while(1){
-        float max_gx = fabs(gyro_buf[0]);
-        float max_gy = fabs(gyro_buf[1]);
-        float max_gz = fabs(gyro_buf[2]);
+        float max_ax = fabs(acc_buff[0]);
+        float max_az = fabs(acc_buff[1]);
+        float max_gy = fabs(acc_buff[2]);
         float max_num = 0.0f;
         int axis = 0;
-        for (int i = 0; i<3; i++){
-            if (fabs(gyro_buf[i]) > max_num){
-                max_num = fabs(gyro_buf[i]);
+        for (int i = 0; i<2; i++){
+            if (fabs(acc_buff[i]) > max_num) {
+                max_num = fabs(acc_buff[i]);
                 axis = i;
             }
         }
-        if (fabs(gyro_buf[axis]) >= 175){
-            switch (axis){
+        if (max_gy >= 200) {
+            symbol = 0x20;
+        }
+        else if (max_num >= 2) {
+            switch (axis) {
                 case 0:
-                    symbol = 0x2D; // '.'
+                    symbol = 0x2E;
                     break;
                 case 1:
-                    symbol = 0x20; // ' '
-                    break;
-                case 2:
-                    symbol = 0x2E; // '-'
+                    symbol = 0x2D;
                     break;
                 default:
-                    symbol = 0x3F;
+                    symbol = 0;
                     break;
             }
-            if (symbol != 0x3F){
-                printing_task();
-                sleep_ms(300);    
-            }
+        } 
+        if (symbol != 0) {
+            printing_task();
         }
         max_num = 0;
         axis = 0;
-        vTaskDelay(pdMS_TO_TICKS(375));
+        symbol = 0;
+        vTaskDelay(pdMS_TO_TICKS(300));
     }
 }
 
