@@ -12,6 +12,7 @@
 float ax_global, ay_global, az_global, gx_global, gy_global, gz_global, t_global;
 int symbol;
 float acc_buff[3];
+bool sensor_flag = true;
 
 void imu_task(void *pvParameters);
 void checking_max(void *arg);
@@ -29,7 +30,7 @@ void imu_task(void *pvParameters) {
             printf ("Enable gyro: %d\n",_enablegyro);
             int _gyro = ICM42670_startGyro(ICM42670_GYRO_ODR_DEFAULT, ICM42670_GYRO_FSR_DEFAULT);
             printf ("Gyro return:  %d\n", _gyro);
-            int _accel = ICM42670_startAccel(100, ICM42670_ACCEL_FSR_DEFAULT);
+            int _accel = ICM42670_startAccel(200, ICM42670_ACCEL_FSR_DEFAULT);
             printf ("Accel return:  %d\n", _accel);
         } else {
             printf("Failed to initialize ICM-42670P.\n");
@@ -37,13 +38,15 @@ void imu_task(void *pvParameters) {
         // Start collection data here. Infinite loop. 
         while (1)
         {
-
             if (ICM42670_read_sensor_data(&ax_global, &ay_global, &az_global, &gx_global, &gy_global, &gz_global, &t_global) == 0) {
                 // printf("Acc: ax= %.3f ay=%.3f az=%.3f|Gyro [dps]: gx=%.3f gy=%.3f gz=%.3f \n", 
                 //     ax_global, ay_global, az_global, gx_global, gy_global, gz_global, t_global);
-                acc_buff[0] = ax_global;
+                float modulus = sqrt(ax_global*ax_global + ay_global*ay_global);
+                acc_buff[0] = modulus;
                 acc_buff[1] = az_global;
                 acc_buff[2] = gy_global;
+                sensor_flag = false;
+                    
             } else {
                 printf("Failed to read imu data\n");
             }
@@ -53,9 +56,9 @@ void imu_task(void *pvParameters) {
 
 void checking_max(void *arg){
     while(1){
-        float max_ax = fabs(acc_buff[0]);
-        float max_az = fabs(acc_buff[1]);
-        float max_gy = fabs(acc_buff[2]);
+        float local_modulus = fabs(acc_buff[0]);
+        float local_az = fabs(acc_buff[1]);
+        float local_gy = fabs(acc_buff[2]);
         float max_num = 0.0f;
         int axis = 0;
         for (int i = 0; i<2; i++){
@@ -64,28 +67,21 @@ void checking_max(void *arg){
                 axis = i;
             }
         }
-        if (max_gy >= 200) {
+        if (local_gy >= 170) {
             symbol = 0x20;
+            printing_task();
         }
-        else if (max_num >= 2) {
-            switch (axis) {
-                case 0:
-                    symbol = 0x2E;
-                    break;
-                case 1:
-                    symbol = 0x2D;
-                    break;
-                default:
-                    symbol = 0;
-                    break;
-            }
-        } 
-        if (symbol != 0) {
+        else if(local_modulus > 2){
+            symbol = 0x2E; // '.'
+            printing_task();
+        }
+        else if(local_az > 1.3){
+            symbol = 0x2D; // '-'
             printing_task();
         }
         max_num = 0;
         axis = 0;
-        symbol = 0;
+        sensor_flag = true;
         vTaskDelay(pdMS_TO_TICKS(300));
     }
 }
@@ -93,6 +89,10 @@ void checking_max(void *arg){
 void printing_task(){
 
     printf("Symbol: %c\n", symbol);
+    printf("Wait 2 seconds for next detection...\n");
+    symbol = 0;
+    sleep_ms(2500);
+    printf("Make the gesture now!\n");
 
 }
 
