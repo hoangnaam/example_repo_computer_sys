@@ -1,5 +1,7 @@
 
 #include <stdio.h>
+#include <string.h>
+#include <ctype.h>
 #include <pico/stdlib.h>
 
 #include <FreeRTOS.h>
@@ -8,6 +10,33 @@
 
 #include <tkjhat/sdk.h>
 #include <math.h>
+
+typedef struct {
+    char letter;
+    const char *morse;
+} morse_map_t;
+
+static const morse_map_t morse_table[] = {
+    // Letters
+    { 'A', ".-"    }, { 'B', "-..." }, { 'C', "-.-." }, { 'D', "-.."  },
+    { 'E', "."     }, { 'F', "..-." }, { 'G', "--."  }, { 'H', "...." },
+    { 'I', ".."    }, { 'J', ".---" }, { 'K', "-.-"  }, { 'L', ".-.." },
+    { 'M', "--"    }, { 'N', "-."   }, { 'O', "---"  }, { 'P', ".--." },
+    { 'Q', "--.-"  }, { 'R', ".-."  }, { 'S', "..."  }, { 'T', "-"    },
+    { 'U', "..-"   }, { 'V', "...-" }, { 'W', ".--"  }, { 'X', "-..-" },
+    { 'Y', "-.--"  }, { 'Z', "--.." },
+
+    // Digits
+    { '0', "-----" }, { '1', ".----" }, { '2', "..---" }, { '3', "...--" },
+    { '4', "....-" }, { '5', "....." }, { '6', "-...." }, { '7', "--..." },
+    { '8', "---.." }, { '9', "----." },
+
+    // Some extras if you want them
+    { '.', ".-.-.-" }, { ',', "--..--" }, { '?', "..--.." },
+};
+
+
+#define MORSE_TABLE_SIZE (sizeof(morse_table) / sizeof(morse_table[0]))
 
 float ax_global, ay_global, az_global, gx_global, gy_global, gz_global, t_global;
 char * symbol;
@@ -68,63 +97,126 @@ void check_acceleration(void *arg) {
     }
 }
 
+char translating(char *check_buff){
+    for (int i = 0; i < MORSE_TABLE_SIZE; i++){
+        if (strcmp(check_buff, morse_table[i].morse) == 0){ //Co-pilot suggests using strcmp here (I accidentally pressed tab)
+            return morse_table[i].letter;
+        }
+    }
+    return '|'; //GPT said i need to put this code here (org: in side the for loop)
+}
+
+void check_letter(char *buf_full_symbols){
+    char giving_buff[INPUT_BUFFER_SIZE];
+    strcpy(giving_buff, buf_full_symbols); // GPT suggests the change (org: char giving_buff[] = buf_full_symbols;)
+    char checking_buf[10];
+    char printing_buf[INPUT_BUFFER_SIZE];
+    int giving_buff_index = 0;
+    int checking_buf_index = 0;
+    int printing_buf_index = 0;
+
+    for (giving_buff_index = 0; giving_buff_index < sizeof(giving_buff); giving_buff_index++){
+        if (giving_buff[giving_buff_index] == '\0'){
+            checking_buf[checking_buf_index] = '\0';
+            char output = translating(checking_buf);
+            if (output == '|'){
+                printing_buf[printing_buf_index] = '\0';
+                printf("Please look at the Morse code table\n");
+                printf("%s", printing_buf);
+                break;
+            }
+            printing_buf[printing_buf_index] = output;
+            printing_buf[printing_buf_index + 1] = '\0'; //GPT reminds me about the null terminate
+            printf("%s", printing_buf);
+            break;
+        } 
+        if (giving_buff[giving_buff_index] == ' '){
+            checking_buf[checking_buf_index] = '\0';
+            char output = translating(checking_buf);
+            if (output == '|'){
+                printing_buf[printing_buf_index] = '\0';
+                printf("Please look at the Morse code table\n");
+                printf("%s", printing_buf);
+                break;
+            }
+            printing_buf[printing_buf_index] = output;
+            printing_buf_index++;
+            if (giving_buff[giving_buff_index + 1] == ' '){
+                if (giving_buff[giving_buff_index + 2] == ' '){
+                    printing_buf[printing_buf_index] = '\0'; 
+                    printf("%s", printing_buf);
+                    break;
+                }
+                else{
+                    if (giving_buff[giving_buff_index + 2] =='\0'){
+                        printing_buf[printing_buf_index] = '\0';
+                        printf("%s", printing_buf);
+                        break;
+                    }
+                    printing_buf[printing_buf_index] = ' '; 
+                    printing_buf_index++;
+                    checking_buf_index = 0;
+                    giving_buff_index++;
+                }
+            }
+            else{
+                if (giving_buff[giving_buff_index + 1] == '\0'){
+                    printing_buf[printing_buf_index] = '\0';
+                    printf("%s", printing_buf);
+                    break;
+                }
+                checking_buf_index = 0;
+            }
+        }
+        else{
+            checking_buf[checking_buf_index] = giving_buff[giving_buff_index];
+            checking_buf_index++;
+        }
+    }
+}
+
+
 static void receive_task(void *arg){
     (void)arg;
     char line[INPUT_BUFFER_SIZE];
     size_t index = 0;
-    bool no_print = true;
+    bool no_print = false;
     while (1){
         int c = getchar_timeout_us(0);
         if (c != PICO_ERROR_TIMEOUT){// I have received a character
-            if (c == '\r') continue; // ignore CR, wait for LF if (ch == '\n') { line[len] = '\0';
+            if (c == '1'){
+                current_mode = mode_0;
+                printf("Mode 0 selected: Button controlled Morse code input\n");
+                no_print = true;
+            }
+            else if (c == '2'){
+                current_mode = mode_1;
+                printf("Mode 1 selected: Gesture controlled Morse code input\n");
+                no_print = true;
+            }
             else if (c == '\n'){
-                // terminate and process the collected line
-                line[index] = '\0';
                 if (no_print == false){
-                    continue;
-                }
-                else{
-                    printf("__[RX]:\"%s\"__\n", line); //Print as debug in the output
+                    line[index] = '\0';
+                    check_letter(line); 
                     index = 0;
-                    vTaskDelay(pdMS_TO_TICKS(100)); // Wait for new message
+                }
+                no_print = false;
+            }
+            else{
+                if (index < INPUT_BUFFER_SIZE - 1){
+                    line[index] = (char)c;
+                    index++;
                 }
             }
-            else if(index < INPUT_BUFFER_SIZE - 1){
-                if (((char) c == '1') || ((char)c == '2')){
-                    if ((char) c == '1'){
-                        current_mode = mode_0;
-                        current_state = READING;
-                        sleep_ms(500);
-                        printf("Switched to Mode 0: Gesture Detection Mode\n");
-                        no_print = false;
-                    }
-                    else if ((char) c == '2'){
-                        current_mode = mode_1;
-                        current_state = READING;
-                        sleep_ms(500);
-                        printf("Switched to Mode 1: Button Press Mode\n");
-                        no_print = false;
-                    }
-                }
-                else {
-                    line[index++] = (char)c;
-                    no_print = true;
-                }
-            }
-            else { //Overflow: print and restart the buffer with the new character. 
-                line[INPUT_BUFFER_SIZE - 1] = '\0';
-                printf("__[RX]:\"%s\"__\n", line);
-                index = 0; 
-                line[index++] = (char)c; 
-                }
         }
         else {
             vTaskDelay(pdMS_TO_TICKS(100)); // Wait for new message
         }
         vTaskDelay(pdMS_TO_TICKS(100));
     }
-
 }
+
+
 void imu_task(void *pvParameters) {
     (void)pvParameters;
         // Start collection data here. Infinite loop. 
@@ -207,7 +299,7 @@ void printing_task(){
         }
         Screen();
         printf("Wait 2 seconds for next detection...\n");
-        sleep_ms(2500);
+        sleep_ms(1500);
         printf("Make the gesture now!\n");
     }
 }
