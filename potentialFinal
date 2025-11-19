@@ -72,35 +72,51 @@ static void receive_task(void *arg){
     (void)arg;
     char line[INPUT_BUFFER_SIZE];
     size_t index = 0;
-    
+    bool no_print = true;
     while (1){
         int c = getchar_timeout_us(0);
         if (c != PICO_ERROR_TIMEOUT){// I have received a character
             if (c == '\r') continue; // ignore CR, wait for LF if (ch == '\n') { line[len] = '\0';
-            if (c == '1'){
-                current_mode = mode_0;
-                current_state = READING;
-            }
-            else if (c == '2'){
-                current_mode = mode_1;
-                current_state = READING;
-            }
             else if (c == '\n'){
                 // terminate and process the collected line
-                line[index] = '\0'; 
-                printf("__[RX]:\"%s\"__\n", line); //Print as debug in the output
-                index = 0;
-                vTaskDelay(pdMS_TO_TICKS(100)); // Wait for new message
+                line[index] = '\0';
+                if (no_print == false){
+                    continue;
+                }
+                else{
+                    printf("__[RX]:\"%s\"__\n", line); //Print as debug in the output
+                    index = 0;
+                    vTaskDelay(pdMS_TO_TICKS(100)); // Wait for new message
+                }
             }
             else if(index < INPUT_BUFFER_SIZE - 1){
-                line[index++] = (char)c;
+                if (((char) c == '1') || ((char)c == '2')){
+                    if ((char) c == '1'){
+                        current_mode = mode_0;
+                        current_state = READING;
+                        sleep_ms(500);
+                        printf("Switched to Mode 0: Gesture Detection Mode\n");
+                        no_print = false;
+                    }
+                    else if ((char) c == '2'){
+                        current_mode = mode_1;
+                        current_state = READING;
+                        sleep_ms(500);
+                        printf("Switched to Mode 1: Button Press Mode\n");
+                        no_print = false;
+                    }
+                }
+                else {
+                    line[index++] = (char)c;
+                    no_print = true;
+                }
             }
             else { //Overflow: print and restart the buffer with the new character. 
                 line[INPUT_BUFFER_SIZE - 1] = '\0';
                 printf("__[RX]:\"%s\"__\n", line);
                 index = 0; 
                 line[index++] = (char)c; 
-            }
+                }
         }
         else {
             vTaskDelay(pdMS_TO_TICKS(100)); // Wait for new message
