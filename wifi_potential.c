@@ -1,402 +1,193 @@
-
 #include <stdio.h>
 #include <string.h>
-#include <ctype.h>
-#include <pico/stdlib.h>
+#include <stdint.h>
 
-#include <FreeRTOS.h>
-#include <queue.h>
-#include <task.h>
-
-#include "semphr.h"
+#include "pico/stdlib.h"
 #include "FreeRTOS.h"
-#include <tkjhat/sdk.h>
-#include <math.h>
-#include "lwip/dns.h" //copilot suggests
+#include "semphr.h"
+
+// --- lwIP headers ---
+#include "lwip/opt.h"
+#include "lwip/dns.h"
 #include "lwip/ip_addr.h"
 #include "lwip/sockets.h"
-#include "lwip/err.h"
-#include "lwip/sys.h"
-#include "lwip/tcp.h"
-#include "lwipopts.h"
+
+// --- Critical fix: undefine lwIP's macro before including Pico SDK ---
+#undef poll
+
+#include "pico/cyw43_arch.h"
+
+#define TCP_TRANSPORT_WAIT_MS 10000
+#define INPUT_BUFFER_SIZE     512
 
 typedef struct {
-    char letter;
-    const char *morse;
-} morse_map_t;
-
-static const morse_map_t morse_table[] = {
-    // Letters
-    { 'A', ".-"    }, { 'B', "-..." }, { 'C', "-.-." }, { 'D', "-.."  },
-    { 'E', "."     }, { 'F', "..-." }, { 'G', "--."  }, { 'H', "...." },
-    { 'I', ".."    }, { 'J', ".---" }, { 'K', "-.-"  }, { 'L', ".-.." },
-    { 'M', "--"    }, { 'N', "-."   }, { 'O', "---"  }, { 'P', ".--." },
-    { 'Q', "--.-"  }, { 'R', ".-."  }, { 'S', "..."  }, { 'T', "-"    },
-    { 'U', "..-"   }, { 'V', "...-" }, { 'W', ".--"  }, { 'X', "-..-" },
-    { 'Y', "-.--"  }, { 'Z', "--.." },
-
-    // Digits
-    { '0', "-----" }, { '1', ".----" }, { '2', "..---" }, { '3', "...--" },
-    { '4', "....-" }, { '5', "....." }, { '6', "-...." }, { '7', "--..." },
-    { '8', "---.." }, { '9', "----." },
-
-    // Some extras if you want them
-    { '.', ".-.-.-" }, { ',', "--..--" }, { '?', "..--.." },
-};
-
-
-#define MORSE_TABLE_SIZE (sizeof(morse_table) / sizeof(morse_table[0]))
-
-float ax_global, ay_global, az_global, gx_global, gy_global, gz_global, t_global;
-char * symbol;
-float acc_buff[3];
-bool button_pressed = false;
-enum modes { mode_0 = 0, mode_1};
-enum modes current_mode = mode_0;
-enum states { READING=0, PRINTING};
-enum states current_state = READING;
-#define INPUT_BUFFER_SIZE 256
-#define TCP_TRANSPORT_WAIT 10000
-
-typedef void (*dns_found_callback_t)(const char *name, const ip_addr_t *ipaddr, void *callback_arg);
-err_t dns_gethostbyname(const char *hostname, ip_addr_t *addr, dns_found_callback_t found, void *callback_arg);
-
-typedef struct {
-    ip_addr_t xHost;          // Holds the resolved IP address
-    char xHostName[256];      // Hostname
-    uint16_t xPort;           // Port number
-    SemaphoreHandle_t xHostDNSFound; // Semaphore for DNS resolution
+    ip_addr_t        host;     // Resolved IP
+    uint16_t         port;     // Port number
+    int              sock;     // Socket file descriptor
+    SemaphoreHandle_t dns_sem; // DNS completion semaphore
 } TCPTransport;
 
-bool transConnect(TCPTransport *transport, const char *host, uint16_t port);
-void dnsCB(const char *name, const ip_addr_t *ipaddr, void *callback_arg);
-bool transConnect(TCPTransport *transport, const char *host, uint16_t port) {
-    err_t res = dns_gethostbyname(host, &transport->xHost, dnsCB, transport);
+/* --------------------- DNS CALLBACK (internal) --------------------- */
 
-    strcpy(transport->xHostName, host);
-    transport->xPort = port;
-
-    if (xSemaphoreTake(transport->xHostDNSFound, TCP_TRANSPORT_WAIT) != pdTRUE) {
-        printf("DNS Timeout on Connect: %s, %d\n", host, res);
-        // return false;
-    }
-
-    // Call another function to establish the connection
-    return transConnect(transport, transport->xHostName, transport->xPort);
-}
-
-// Example DNS callback function
-void dnsCB(const char *name, const ip_addr_t *ipaddr, void *callback_arg) {
-    TCPTransport *transport = (TCPTransport *)callback_arg;
+static void dns_cb(const char *name, const ip_addr_t *ipaddr, void *callback_arg)
+{
+    TCPTransport *t = (TCPTransport *)callback_arg;
 
     if (ipaddr != NULL) {
-        transport->xHost = *ipaddr;
-        xSemaphoreGive(transport->xHostDNSFound);
+        t->host = *ipaddr;
+    }
+    /* Just signal that DNS is done (success or failure). */
+    xSemaphoreGive(t->dns_sem);
+}
+
+/* --------------------- 1. DNS LOOKUP --------------------- */
+
+void tcp_dns_lookup(TCPTransport *t, const char *hostname)
+{
+    err_t res;
+
+    /* Assume t->dns_sem is already created */
+    /* Clear any previous give */
+    xSemaphoreTake(t->dns_sem, 0);
+
+    res = dns_gethostbyname(hostname, &t->host, dns_cb, t); // don't understand the dns_cb and t
+
+    if (res == ERR_OK) {
+        /* Address was resolved immediately, t->host is valid now */
+        return;
+    }
+
+    if (res == ERR_INPROGRESS) {
+        /* Wait for the callback to signal completion */
+        xSemaphoreTake(t->dns_sem, pdMS_TO_TICKS(TCP_TRANSPORT_WAIT_MS)); // don't understand what is xSemaphoreTake
+        return;
+    }
+
+    /* Any other res means error; no extra handling as requested */
+    return;
+}
+
+/* --------------------- 2. OPEN SOCKET --------------------- */
+
+void tcp_open_socket(TCPTransport *t)
+{
+    struct sockaddr_in serv_addr; //Is this struct undefined?
+
+    t->sock = socket(AF_INET, SOCK_STREAM, 0);
+
+    memset(&serv_addr, 0, sizeof(serv_addr)); // why 0?
+    serv_addr.sin_family = AF_INET;             //what this line and the next line do?
+    serv_addr.sin_port   = htons(t->port);
+
+    /* Same trick as in the C++ code you showed */
+    memcpy(&serv_addr.sin_addr.s_addr, &t->host, sizeof(t->host)); //what is copied and what is the first argument?
+
+    connect(t->sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)); // is it we need to connect to the ip address? What is this function doing? (connect to where?)
+}
+
+/* --------------------- 3. HTTPS GET (send only) --------------------- */
+
+void tcp_https_get(TCPTransport *t, const char *hostname, const char *path)
+{
+    char request[INPUT_BUFFER_SIZE];
+
+    /* This builds a plain HTTP request.
+       NOTE: Real HTTPS requires a TLS layer on top of this socket.
+       Here we just send the HTTP GET bytes. */
+
+    snprintf(request, sizeof(request),
+             "GET %s HTTP/1.1\r\n"
+             "Host: %s\r\n"
+             "Connection: close\r\n"
+             "\r\n",
+             path, hostname); //is it for now, the program sends nothig?
+
+    write(t->sock, request, strlen(request)); // what is t->sock, I saw you used a lot before
+}
+
+/* --------------------- 4. SOCKET RECEIVE --------------------- */
+
+void tcp_read_response(TCPTransport *t)
+{
+    char buffer[INPUT_BUFFER_SIZE];
+    int n;
+
+    printf("Reading response...\n");
+
+    while ((n = read(t->sock, buffer, sizeof(buffer)-1)) > 0) {
+        buffer[n] = '\0';
+        printf("%s", buffer);   // print to serial
+    }
+
+    printf("\n--- End of response ---\n");
+}
+
+/* --------------------- 5. SOCKET CLOSE --------------------- */
+
+void tcp_transport_close(TCPTransport *t)
+{
+    close(t->sock);
+}
+
+/* --------------------- MAIN EXAMPLE --------------------- */
+
+int connecting_wifi(){
+    if (cyw43_arch_init()) {
+        printf("Failed to initialize WiFi chip!\n");
+        return -1;
+    }
+
+    printf("Connecting to WiFi...\n");
+
+    // Connect to Wi-Fi (blocking)
+    if (cyw43_arch_wifi_connect_timeout_ms("Zaf", "$oulTerminator",
+                                           CYW43_AUTH_WPA2_AES_PSK, 30000)) {
+        printf("WiFi connection failed!\n");
     } else {
-        printf("DNS resolution failed for %s\n", name);
+        printf("Pico W is connected to WiFi!\n");
+    }
+
+    // Keep running
+    while (true) {
+        sleep_ms(1000);
+        printf("Pico W is running...\n");
     }
 }
 
+int main(void)
+{
+    /* Pico / stdio init */
+    stdio_init_all();  // You need to define somewhere if not using stdio
 
-int status();
-bool transClose();
-int32_t transSend(const void *pBuffer, size_t bytesToSend);
-int32_t transRead(void *pBuffer, size_t bytesToRecv);
+    connecting_wifi();
 
+    TCPTransport transport;
+    const char *hostname = "neverssl.com";
+    const char *path     = "/"; //is it you can change "/" to anything else?
 
+    transport.port    = 80;  /* HTTPS port */
+    transport.dns_sem = xSemaphoreCreateBinary();  // Requires FreeRTOS running
 
-void imu_task(void *pvParameters);
-void checking_max(void *arg);
-void printing_task();
-void Screen();
+    /* 1. DNS lookup */
+    tcp_dns_lookup(&transport, hostname);
 
+    /* 2. Open socket */
+    tcp_open_socket(&transport);
 
-void ButtonFxn(uint gpio, uint32_t events) {
-    button_pressed = true;
-}
+    /* 3. HTTPS GET (send only) */
+    tcp_https_get(&transport, hostname, path);
 
-void check_acceleration(void *arg) {
-    while(1) {
-        if (current_mode == mode_1) {
-            if (current_state == PRINTING) {
-                if (button_pressed) {
-                    float absX = fabs(ax_global);
-                    float absY = fabs(ay_global);
-                    float absZ = fabs(az_global);
-                    
-                    if (absX > 0.8) {
-                        symbol = " ";
-                        printf("Symbols:%c\n", 0x20);
-                        buzzer_play_tone(440, 200);
-                        Screen();
-                        
-                    } 
-                    else if (absY > 0.8) {
-                        symbol = "-";
-                        printf("Symbols:%c\n", 0x2D);
-                        buzzer_play_tone(880, 200);
-                        Screen();
-                        
-                    } 
-                    else if (absZ > 0.8) {
-                        symbol = ".";
-                        printf("Symbols:%c\n", 0x2E);
-                        buzzer_play_tone(1320, 200);
-                        Screen();
-                        
-                    }
-                    button_pressed = false;
-                }
-                current_state = READING;
-            }
-        }
-        vTaskDelay(pdMS_TO_TICKS(200));
+    /* 4. HTTPS READ – you said “forget this now”, so not implemented */
+    tcp_read_response(&transport);
+    /* 5. Close socket */
+    tcp_transport_close(&transport);
+
+    /* If this is inside a FreeRTOS task, you probably return or delete the task instead. */
+    // vTaskDelete(NULL);       // You need to define somewhere in a task context
+
+    while (1) {
+        tight_loop_contents(); // Or vTaskDelay(...) if using FreeRTOS
     }
-}
-
-char translating(char *check_buff){
-    for (int i = 0; i < MORSE_TABLE_SIZE; i++){
-        if (strcmp(check_buff, morse_table[i].morse) == 0){ //Co-pilot suggests using strcmp here (I accidentally pressed tab)
-            return morse_table[i].letter;
-        }
-    }
-    return '|'; //GPT said i need to put this code here (org: in side the for loop)
-}
-
-void check_letter(char *buf_full_symbols){
-    char giving_buff[INPUT_BUFFER_SIZE];
-    strcpy(giving_buff, buf_full_symbols); // GPT suggests the change (org: char giving_buff[] = buf_full_symbols;)
-    char checking_buf[10];
-    char printing_buf[INPUT_BUFFER_SIZE];
-    int giving_buff_index = 0;
-    int checking_buf_index = 0;
-    int printing_buf_index = 0;
-
-    for (giving_buff_index = 0; giving_buff_index < sizeof(giving_buff); giving_buff_index++){
-        if (giving_buff[giving_buff_index] == '\0'){
-            checking_buf[checking_buf_index] = '\0';
-            char output = translating(checking_buf);
-            if (output == '|'){
-                printing_buf[printing_buf_index] = '\0';
-                printf("Please look at the Morse code table\n");
-                printf("%s", printing_buf);
-                break;
-            }
-            printing_buf[printing_buf_index] = output;
-            printing_buf[printing_buf_index + 1] = '\0'; //GPT reminds me about the null terminate
-            printf("%s", printing_buf);
-            break;
-        } 
-        if (giving_buff[giving_buff_index] == ' '){
-            checking_buf[checking_buf_index] = '\0';
-            char output = translating(checking_buf);
-            if (output == '|'){
-                printing_buf[printing_buf_index] = '\0';
-                printf("Please look at the Morse code table\n");
-                printf("%s", printing_buf);
-                break;
-            }
-            printing_buf[printing_buf_index] = output;
-            printing_buf_index++;
-            if (giving_buff[giving_buff_index + 1] == ' '){
-                if (giving_buff[giving_buff_index + 2] == ' '){
-                    printing_buf[printing_buf_index] = '\0'; 
-                    printf("%s", printing_buf);
-                    break;
-                }
-                else{
-                    if (giving_buff[giving_buff_index + 2] =='\0'){
-                        printing_buf[printing_buf_index] = '\0';
-                        printf("%s", printing_buf);
-                        break;
-                    }
-                    printing_buf[printing_buf_index] = ' '; 
-                    printing_buf_index++;
-                    checking_buf_index = 0;
-                    giving_buff_index++;
-                }
-            }
-            else{
-                if (giving_buff[giving_buff_index + 1] == '\0'){
-                    printing_buf[printing_buf_index] = '\0';
-                    printf("%s", printing_buf);
-                    break;
-                }
-                checking_buf_index = 0;
-            }
-        }
-        else{
-            checking_buf[checking_buf_index] = giving_buff[giving_buff_index];
-            checking_buf_index++;
-        }
-    }
-}
-
-
-static void receive_task(void *arg){
-    (void)arg;
-    char line[INPUT_BUFFER_SIZE];
-    size_t index = 0;
-    bool no_print = false;
-    while (1){
-        int c = getchar_timeout_us(0);
-        if (c != PICO_ERROR_TIMEOUT){// I have received a character
-            if (c == '1'){
-                current_mode = mode_0;
-                printf("Mode 0 selected: Button controlled Morse code input\n");
-                no_print = true;
-            }
-            else if (c == '2'){
-                current_mode = mode_1;
-                printf("Mode 1 selected: Gesture controlled Morse code input\n");
-                no_print = true;
-            }
-            else if (c == '\n'){
-                if (no_print == false){
-                    line[index] = '\0';
-                    check_letter(line); 
-                    index = 0;
-                }
-                no_print = false;
-            }
-            else{
-                if (index < INPUT_BUFFER_SIZE - 1){
-                    line[index] = (char)c;
-                    index++;
-                }
-            }
-        }
-        else {
-            vTaskDelay(pdMS_TO_TICKS(100)); // Wait for new message
-        }
-        vTaskDelay(pdMS_TO_TICKS(100));
-    }
-}
-
-
-void imu_task(void *pvParameters) {
-    (void)pvParameters;
-        // Start collection data here. Infinite loop. 
-        while (1)
-        {
-            if (current_mode == mode_0 || current_mode == mode_1) {
-                if (current_state == READING) {
-                    if (ICM42670_read_sensor_data(&ax_global, &ay_global, &az_global, &gx_global, &gy_global, &gz_global, &t_global) == 0) {
-                        float modulus = sqrt(ax_global*ax_global + ay_global*ay_global);
-                        acc_buff[0] = modulus;
-                        acc_buff[1] = az_global;
-                        acc_buff[2] = gy_global;
-                        current_state = PRINTING;                    
-                    } else {
-                        printf("Failed to read imu data\n");
-                    }
-                }
-            }
-            vTaskDelay(pdMS_TO_TICKS(100));
-        }
-}
-
-void checking_max(void *arg){
-    while(1){
-        if (current_mode == mode_0) {
-            if (current_state == PRINTING) {
-                float local_modulus = fabs(acc_buff[0]);
-                float local_az = fabs(acc_buff[1]);
-                float local_gy = fabs(acc_buff[2]);
-                float max_num = 0.0f;
-                int axis = 0;
-                for (int i = 0; i<2; i++){
-                    if (fabs(acc_buff[i]) > max_num) {
-                        max_num = fabs(acc_buff[i]);
-                        axis = i;
-                    }
-                }
-                if (local_gy >= 170 && local_modulus < 1.2){
-                    symbol = " "; // ' ' (space)
-                    printing_task();
-                }
-                else if(local_modulus > 1.3 && local_az < 1){
-                    symbol = "."; // '.'
-                    printing_task();
-                }
-                else if(local_az > 1.3 && local_modulus < 0.8){
-                    symbol = "-"; // '-'
-                    printing_task();
-                }
-                max_num = 0;
-                axis = 0;
-                current_state = READING;
-            }
-        }
-        vTaskDelay(pdMS_TO_TICKS(200));
-    }
-}
-
-void Screen() {
-        clear_display();
-        if (symbol == " ") {
-            write_text_xy(38,24,"Space");
-        }
-        else {
-            write_text_xy(60,24,symbol);
-        }
-}
-
-void printing_task(){
-    if (current_mode == mode_0) {
-        printf("Symbol: %s\n", symbol);
-        if (symbol == " ") {
-            buzzer_play_tone(440, 200);
-        }
-        else if (symbol == "-") {
-            buzzer_play_tone(880, 200);
-        }
-        else if (symbol == ".") {
-            buzzer_play_tone(1320, 200);
-        }
-        Screen();
-        printf("Wait 2 seconds for next detection...\n");
-        sleep_ms(1500);
-        printf("Make the gesture now!\n");
-    }
-}
-
-int main() {
-    stdio_init_all();
-    // Uncomment this lines if you want to wait till the serial monitor is connected
-    /*while (!stdio_usb_connected()){
-        sleep_ms(10);
-    }*/
-    init_hat_sdk();
-    init_display();
-    clear_display();
-    init_buzzer();
-    if (init_ICM42670() == 0) {
-            printf("ICM-42670P initialized successfully!\n");
-            if (ICM42670_start_with_default_values() != 0){
-                printf("ICM-42670P could not initialize accelerometer or gyroscope");
-            }
-            int _enablegyro = ICM42670_enable_accel_gyro_ln_mode();
-            printf ("Enable gyro: %d\n",_enablegyro);
-            int _gyro = ICM42670_startGyro(ICM42670_GYRO_ODR_DEFAULT, ICM42670_GYRO_FSR_DEFAULT);
-            printf ("Gyro return:  %d\n", _gyro);
-            int _accel = ICM42670_startAccel(200, ICM42670_ACCEL_FSR_DEFAULT);
-            printf ("Accel return:  %d\n", _accel);
-        } else {
-            printf("Failed to initialize ICM-42670P.\n");
-        }
-    sleep_ms(300); //Wait some time so initialization of USB and hat is done.
-    printf("Start acceleration test\n");
-
-    gpio_set_irq_enabled_with_callback(BUTTON1, GPIO_IRQ_EDGE_FALL, true, &ButtonFxn);
-    TaskHandle_t hreceive, hbutton, hchecktask, hIMUTask = NULL;
-
-    xTaskCreate(imu_task, "IMUTask", 2048, NULL, 2, &hIMUTask);
-    xTaskCreate(checking_max, "CheckMaxTask", 2048, NULL, 2, &hchecktask);
-    xTaskCreate(check_acceleration, "ButtonTask", 2048, NULL, 2, &hbutton);
-    xTaskCreate(receive_task, "ReceiveTask", 2048, NULL, 2, &hreceive);
-    // Start the FreeRTOS scheduler
-    vTaskStartScheduler();
 
     return 0;
 }
